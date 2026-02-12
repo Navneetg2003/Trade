@@ -1,0 +1,89 @@
+# SOFR Futures Trading Analysis Configuration
+
+# Contracts to analyze
+contracts:
+  - MAR26
+  - JUN26
+  - SEP26
+  - DEC26
+
+# SOFR Contract Specifications
+contract_specs:
+  tick_size: 0.0025        # 0.25 basis points
+  tick_value: 6.25         # $ per tick
+  contract_size: 1000000   # $1M notional
+  pricing: "100_minus_rate" # 100 - SOFR rate
+
+# Support/Resistance Detection Parameters
+detection:
+  lookback_days: 90           # Historical data period
+  min_touches: 2              # Minimum touches to validate a level
+  price_tolerance: 0.005      # Price tolerance for level clustering (0.5bp)
+  strength_threshold: 0.6     # Level strength score threshold (0-1)
+  
+  # Pivot point settings
+  pivot:
+    left_bars: 5              # Bars to the left of pivot
+    right_bars: 5             # Bars to the right of pivot
+  
+  # Volume profile settings
+  volume_profile:
+    enabled: true
+    bins: 50                  # Number of price bins
+    value_area: 0.70          # Value area percentage
+  
+  # Fibonacci settings
+  fibonacci:
+    enabled: false
+    levels: [0.236, 0.382, 0.5, 0.618, 0.786]
+
+# Data Source Configuration
+data_source:
+  provider: "yahoo"           # Options: yahoo, csv, api
+  update_frequency: "1d"      # 1d, 1h, 15m, 5m
+  
+  # Yahoo Finance ticker mapping (if using yfinance)
+  ticker_mapping:
+    MAR26: "SR3H26.CBT"
+    JUN26: "SR3M26.CBT"
+    SEP26: "SR3U26.CBT"
+    DEC26: "SR3Z26.CBT"
+  
+  # CSV file path (if using CSV)
+  csv_path: "data/"
+  
+# Visualization Settings
+visualization:
+  chart_type: "candlestick"   # candlestick or line
+  show_volume: true
+  highlight_levels: true
+  color_scheme:
+    resistance: "#FF4444"      # Red
+    support: "#44FF44"         # Green
+    neutral: "#FFAA00"         # Orange
+  
+  # Chart dimensions
+  width: 1400
+  height: 800
+  
+  # Export settings
+  export_format: "html"        # html, png, both
+  export_path: "output/"
+
+# Analysis Settings
+analysis:
+  # Risk levels
+  strong_level: 3             # 3+ touches = strong level
+  moderate_level: 2           # 2 touches = moderate level
+  
+  # Level validation
+  recent_test_days: 30        # Days to check for recent tests
+  
+  # Output settings
+  max_levels_per_side: 5      # Max S/R levels to display per side
+  round_to: 0.005             # Round levels to nearest value
+
+# Alerts (future feature)
+alerts:
+  enabled: false
+  price_proximity: 0.01       # Alert when price within 1bp of level
