@@ -9,8 +9,8 @@ contracts:
 
 # SOFR Contract Specifications
 contract_specs:
-  tick_size: 0.0025        # 0.25 basis points
-  tick_value: 6.25         # $ per tick
+  tick_size: 0.005         # 0.5 basis points (price moves in 0.005 increments)
+  tick_value: 12.50        # $ per tick
   contract_size: 1000000   # $1M notional
   pricing: "100_minus_rate" # 100 - SOFR rate
 
@@ -40,6 +40,7 @@ detection:
 # Data Source Configuration
 data_source:
   provider: "yahoo"           # Options: yahoo, csv, api
+  csv_path: "data/"           # Path to CSV files
   update_frequency: "1d"      # 1d, 1h, 15m, 5m
   
   # Yahoo Finance ticker mapping (if using yfinance)

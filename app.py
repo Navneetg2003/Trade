@@ -99,6 +99,7 @@ def main():
     
     # Header
     st.title("📈 SOFR Futures Support & Resistance Analyzer")
+    st.caption("Order-book style price ladder | Tick-by-tick precision | Real-time trading levels")
     st.markdown("---")
     
     # Sidebar - Configuration
@@ -158,6 +159,14 @@ def main():
             step=0.1,
             help="Minimum level strength score (0-1)"
         )
+        
+        st.markdown("---")
+        
+        # Trading specs display
+        st.subheader("Contract Specs")
+        tick_size = config['contract_specs'].get('tick_size', 0.0025)
+        tick_value = config['contract_specs'].get('tick_value', 6.25)
+        st.caption(f"Tick: {tick_size:.4f} (${tick_value:.2f}) | Pricing: 100 - Rate")
         
         st.markdown("---")
         
@@ -281,6 +290,12 @@ def display_single_contract_analysis(contract_name: str, results: dict, config: 
     # Key metrics
     col1, col2, col3, col4 = st.columns(4)
     
+    # Calculate strong and moderate levels
+    strong_support = len([l for l in results['support_levels'] if l.strength_score >= 0.8])
+    moderate_support = len([l for l in results['support_levels'] if 0.6 <= l.strength_score < 0.8])
+    strong_resistance = len([l for l in results['resistance_levels'] if l.strength_score >= 0.8])
+    moderate_resistance = len([l for l in results['resistance_levels'] if 0.6 <= l.strength_score < 0.8])
+    
     with col1:
         st.metric(
             "Current Price",
@@ -289,17 +304,23 @@ def display_single_contract_analysis(contract_name: str, results: dict, config: 
         )
     
     with col2:
+        total_support = strong_support + moderate_support
+        support_delta = f"🟢{strong_support} 🟡{moderate_support}"
         st.metric(
             "Support Levels",
-            len(results['support_levels']),
-            help="Number of detected support levels"
+            total_support,
+            delta=support_delta,
+            help="Strong and Moderate support levels"
         )
     
     with col3:
+        total_resistance = strong_resistance + moderate_resistance
+        resistance_delta = f"🟢{strong_resistance} 🟡{moderate_resistance}"
         st.metric(
             "Resistance Levels",
-            len(results['resistance_levels']),
-            help="Number of detected resistance levels"
+            total_resistance,
+            delta=resistance_delta,
+            help="Strong and Moderate resistance levels"
         )
     
     with col4:
@@ -326,49 +347,165 @@ def display_single_contract_analysis(contract_name: str, results: dict, config: 
     with col_levels:
         st.subheader("Key Levels")
         
-        # Resistance levels
-        with st.expander("🔴 Resistance Levels", expanded=True):
-            if results['resistance_levels']:
-                for i, level in enumerate(results['resistance_levels'], 1):
-                    st.markdown(f"""
-                    **Level {i}**: `{level.price:.4f}`  
-                    Touches: {level.touches} | Strength: {format_level_strength(level.strength_score)}  
-                    Distance: {((level.price / results['current_price'] - 1) * 100):.2f}%
-                    """)
-                    st.markdown("---")
-            else:
-                st.info("No resistance levels detected")
+        # Filter levels by strength
+        strong_resistance = [l for l in results['resistance_levels'] if l.strength_score >= 0.8]
+        moderate_resistance = [l for l in results['resistance_levels'] if 0.6 <= l.strength_score < 0.8]
         
-        # Support levels
-        with st.expander("🟢 Support Levels", expanded=True):
-            if results['support_levels']:
-                for i, level in enumerate(results['support_levels'], 1):
-                    st.markdown(f"""
-                    **Level {i}**: `{level.price:.4f}`  
-                    Touches: {level.touches} | Strength: {format_level_strength(level.strength_score)}  
-                    Distance: {((level.price / results['current_price'] - 1) * 100):.2f}%
-                    """)
-                    st.markdown("---")
-            else:
-                st.info("No support levels detected")
+        strong_support = [l for l in results['support_levels'] if l.strength_score >= 0.8]
+        moderate_support = [l for l in results['support_levels'] if 0.6 <= l.strength_score < 0.8]
+        
+        # Create order-book style price ladder
+        st.markdown("### 📊 Price Ladder")
+        
+        current = results['current_price']
+        tick_size = config['contract_specs'].get('tick_size', 0.0025)
+        
+        # Combine and sort all levels
+        all_levels = []
+        for level in strong_resistance:
+            all_levels.append({'price': level.price, 'type': 'resistance', 'strength': 'strong', 'touches': level.strength})
+        for level in moderate_resistance:
+            all_levels.append({'price': level.price, 'type': 'resistance', 'strength': 'moderate', 'touches': level.strength})
+        for level in strong_support:
+            all_levels.append({'price': level.price, 'type': 'support', 'strength': 'strong', 'touches': level.strength})
+        for level in moderate_support:
+            all_levels.append({'price': level.price, 'type': 'support', 'strength': 'moderate', 'touches': level.strength})
+        
+        # Sort from high to low (like order book)
+        all_levels.sort(key=lambda x: x['price'], reverse=True)
+        
+        # Create table data
+        if all_levels:
+            tick_value = config['contract_specs'].get('tick_value', 6.25)
+            table_html = '<table style="width:100%; font-family: monospace; font-size: 13px; border-collapse: collapse;">'
+            table_html += '<thead><tr style="background: #262730; font-weight: bold;">'
+            table_html += '<th style="padding: 8px; text-align: center;">Level</th>'
+            table_html += '<th style="padding: 8px; text-align: right;">Price</th>'
+            table_html += '<th style="padding: 8px; text-align: center;">Touches</th>'
+            table_html += '<th style="padding: 8px; text-align: right;">Ticks</th>'
+            table_html += '<th style="padding: 8px; text-align: right;">$ Value</th>'
+            table_html += '<th style="padding: 8px; text-align: right;">Distance</th>'
+            table_html += '</tr></thead><tbody>'
+            
+            for lvl in all_levels:
+                price_diff = lvl['price'] - current
+                ticks = int(price_diff / tick_size)
+                pct = (price_diff / current) * 100
+                dollar_value = abs(ticks) * tick_value
+                
+                # Color coding
+                if lvl['type'] == 'resistance':
+                    if lvl['strength'] == 'strong':
+                        row_color = '#4a1c1c'  # Dark red
+                        icon = '🔴'
+                    else:
+                        row_color = '#3a2c1c'  # Dark orange
+                        icon = '🟠'
+                else:
+                    if lvl['strength'] == 'strong':
+                        row_color = '#1c4a1c'  # Dark green
+                        icon = '🟢'
+                    else:
+                        row_color = '#2c3a1c'  # Dark yellow-green
+                        icon = '🟡'
+                
+                table_html += f'<tr style="background: {row_color}; border-bottom: 1px solid #444;">'
+                table_html += f'<td style="padding: 6px; text-align: center;">{icon}</td>'
+                table_html += f'<td style="padding: 6px; text-align: right; font-weight: bold;">{lvl["price"]:.4f}</td>'
+                table_html += f'<td style="padding: 6px; text-align: center;">{lvl["touches"]}</td>'
+                table_html += f'<td style="padding: 6px; text-align: right;">{ticks:+d}</td>'
+                table_html += f'<td style="padding: 6px; text-align: right;">${dollar_value:.0f}</td>'
+                table_html += f'<td style="padding: 6px; text-align: right;">{pct:+.2f}%</td>'
+                table_html += '</tr>'
+            
+            # Add current price row
+            table_html += '<tr style="background: #1a1a2e; border: 2px solid #FFD700; font-weight: bold;">'
+            table_html += '<td style="padding: 8px; text-align: center;">⭐</td>'
+            table_html += f'<td style="padding: 8px; text-align: right; color: #FFD700;">{current:.4f}</td>'
+            table_html += '<td style="padding: 8px; text-align: center; color: #FFD700;">CURRENT</td>'
+            table_html += '<td style="padding: 8px; text-align: right;">—</td>'
+            table_html += '<td style="padding: 8px; text-align: right;">—</td>'
+            table_html += '<td style="padding: 8px; text-align: right;">—</td>'
+            table_html += '</tr>'
+            
+            table_html += '</tbody></table>'
+            st.markdown(table_html, unsafe_allow_html=True)
+            
+            # Legend
+            st.caption("🔴 Strong Resistance | 🟠 Moderate Resistance | 🟢 Strong Support | 🟡 Moderate Support")
+        else:
+            st.info("No strong or moderate levels detected")
     
-    # Statistics section
-    if results['statistics']:
-        st.subheader("📈 Statistics")
+    # Trading Analysis section
+    st.markdown("---")
+    col_analysis1, col_analysis2 = st.columns(2)
+    
+    with col_analysis1:
+        st.subheader("🎯 Immediate Levels")
         
-        stats = results['statistics']
-        col1, col2, col3, col4, col5 = st.columns(5)
+        # Find nearest support and resistance
+        nearest_resistance = None
+        nearest_support = None
         
-        with col1:
-            st.metric("Mean Price", f"{stats.get('mean_price', 0):.4f}")
-        with col2:
-            st.metric("Price Range", f"{stats.get('price_range', 0):.4f}")
-        with col3:
-            st.metric("Avg Volume", f"{stats.get('avg_volume', 0):,.0f}")
-        with col4:
-            st.metric("Trend", stats.get('trend', 'N/A').capitalize())
-        with col5:
-            st.metric("Days Analyzed", len(results['data']))
+        for level in strong_resistance + moderate_resistance:
+            if level.price > results['current_price']:
+                if not nearest_resistance or level.price < nearest_resistance.price:
+                    nearest_resistance = level
+        
+        for level in strong_support + moderate_support:
+            if level.price < results['current_price']:
+                if not nearest_support or level.price > nearest_support.price:
+                    nearest_support = level
+        
+        if nearest_resistance:
+            ticks_to_r = int((nearest_resistance.price - results['current_price']) / config['contract_specs'].get('tick_size', 0.0025))
+            pct_to_r = ((nearest_resistance.price / results['current_price'] - 1) * 100)
+            strength_r = "Strong" if nearest_resistance.strength_score >= 0.8 else "Moderate"
+            st.markdown(f"**Next Resistance:** `{nearest_resistance.price:.4f}`")
+            st.caption(f"{strength_r} | +{ticks_to_r} ticks | +{pct_to_r:.2f}%")
+        else:
+            st.info("No resistance detected above")
+        
+        st.markdown("")
+        
+        if nearest_support:
+            ticks_to_s = int((nearest_support.price - results['current_price']) / config['contract_specs'].get('tick_size', 0.0025))
+            pct_to_s = ((nearest_support.price / results['current_price'] - 1) * 100)
+            strength_s = "Strong" if nearest_support.strength_score >= 0.8 else "Moderate"
+            st.markdown(f"**Next Support:** `{nearest_support.price:.4f}`")
+            st.caption(f"{strength_s} | {ticks_to_s} ticks | {pct_to_s:.2f}%")
+        else:
+            st.info("No support detected below")
+    
+    with col_analysis2:
+        st.subheader("📊 Market Context")
+        
+        # Calculate range to levels
+        if nearest_resistance and nearest_support:
+            total_range = nearest_resistance.price - nearest_support.price
+            position_in_range = (results['current_price'] - nearest_support.price) / total_range
+            
+            st.progress(position_in_range)
+            st.caption(f"Position in range: {position_in_range*100:.1f}%")
+            
+            if position_in_range > 0.7:
+                st.warning("🔺 Near resistance - potential selling zone")
+            elif position_in_range < 0.3:
+                st.success("🔻 Near support - potential buying zone")
+            else:
+                st.info("↔️ Mid-range - neutral zone")
+        
+        # Statistics
+        if results['statistics']:
+            stats = results['statistics']
+            st.markdown("")
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                st.metric("Avg Volume", f"{stats.get('avg_volume', 0):,.0f}")
+                st.metric("Trend", stats.get('trend', 'N/A').capitalize())
+            with col_s2:
+                st.metric("Price Range", f"{stats.get('price_range', 0):.4f}")
+                st.metric("Days Analyzed", len(results['data']))
     
     # Export options
     st.subheader("💾 Export")
@@ -411,13 +548,32 @@ def display_multi_contract_comparison(results_dict: dict, config: dict):
     # Create comparison table
     comparison_data = []
     for contract_name, results in results_dict.items():
+        # Calculate strong and moderate levels
+        strong_support = len([l for l in results['support_levels'] if l.strength_score >= 0.8])
+        moderate_support = len([l for l in results['support_levels'] if 0.6 <= l.strength_score < 0.8])
+        strong_resistance = len([l for l in results['resistance_levels'] if l.strength_score >= 0.8])
+        moderate_resistance = len([l for l in results['resistance_levels'] if 0.6 <= l.strength_score < 0.8])
+        
+        # Get nearest strong level or moderate if no strong exists
+        nearest_support = 'N/A'
+        for level in results['support_levels']:
+            if level.strength_score >= 0.6:
+                nearest_support = f"{level.price:.4f}"
+                break
+        
+        nearest_resistance = 'N/A'
+        for level in results['resistance_levels']:
+            if level.strength_score >= 0.6:
+                nearest_resistance = f"{level.price:.4f}"
+                break
+        
         comparison_data.append({
             'Contract': contract_name,
             'Current Price': f"{results['current_price']:.4f}",
-            'Support Levels': len(results['support_levels']),
-            'Resistance Levels': len(results['resistance_levels']),
-            'Nearest Support': f"{results['support_levels'][0].price:.4f}" if results['support_levels'] else 'N/A',
-            'Nearest Resistance': f"{results['resistance_levels'][0].price:.4f}" if results['resistance_levels'] else 'N/A',
+            'Support (🟢/🟡)': f"{strong_support}/{moderate_support}",
+            'Resistance (🟢/🟡)': f"{strong_resistance}/{moderate_resistance}",
+            'Nearest Support': nearest_support,
+            'Nearest Resistance': nearest_resistance,
         })
     
     comparison_df = pd.DataFrame(comparison_data)
@@ -465,20 +621,36 @@ def display_multi_contract_comparison(results_dict: dict, config: dict):
         with st.expander(f"{contract_name} - Levels Summary", expanded=False):
             col1, col2 = st.columns(2)
             
+            # Filter levels
+            strong_resistance = [l for l in results['resistance_levels'] if l.strength_score >= 0.8]
+            moderate_resistance = [l for l in results['resistance_levels'] if 0.6 <= l.strength_score < 0.8]
+            strong_support = [l for l in results['support_levels'] if l.strength_score >= 0.8]
+            moderate_support = [l for l in results['support_levels'] if 0.6 <= l.strength_score < 0.8]
+            
             with col1:
-                st.markdown("**🔴 Resistance Levels**")
-                if results['resistance_levels']:
-                    for i, level in enumerate(results['resistance_levels'][:3], 1):
-                        st.text(f"{i}. {level.price:.4f} (Touches: {level.touches})")
-                else:
+                st.markdown("**🔴 Resistance**")
+                if strong_resistance:
+                    st.markdown("🟢 Strong:")
+                    for level in strong_resistance[:3]:
+                        st.text(f"  {level.price:.4f}")
+                if moderate_resistance:
+                    st.markdown("🟡 Moderate:")
+                    for level in moderate_resistance[:3]:
+                        st.text(f"  {level.price:.4f}")
+                if not strong_resistance and not moderate_resistance:
                     st.text("None detected")
             
             with col2:
-                st.markdown("**🟢 Support Levels**")
-                if results['support_levels']:
-                    for i, level in enumerate(results['support_levels'][:3], 1):
-                        st.text(f"{i}. {level.price:.4f} (Touches: {level.touches})")
-                else:
+                st.markdown("**🟢 Support**")
+                if strong_support:
+                    st.markdown("🟢 Strong:")
+                    for level in strong_support[:3]:
+                        st.text(f"  {level.price:.4f}")
+                if moderate_support:
+                    st.markdown("🟡 Moderate:")
+                    for level in moderate_support[:3]:
+                        st.text(f"  {level.price:.4f}")
+                if not strong_support and not moderate_support:
                     st.text("None detected")
 
 
