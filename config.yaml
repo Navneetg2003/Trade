@@ -65,7 +65,7 @@ visualization:
   
   # Chart dimensions
   width: 1400
-  height: 800
+  height: 900
   
   # Export settings
   export_format: "html"        # html, png, both

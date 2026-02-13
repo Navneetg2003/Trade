@@ -5,16 +5,26 @@ Interactive web interface for trading analysis
 """
 
 import streamlit as st
+import logging
 import yaml
 import os
 import sys
 from datetime import datetime
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.analyzer import SOFRAnalyzer
 from src.visualizer import TradingVisualizer
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(name)-20s | %(levelname)-7s | %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 # Page configuration
@@ -160,6 +170,23 @@ def main():
             help="Minimum level strength score (0-1)"
         )
         
+        # Pivot settings
+        pivot_bars = st.slider(
+            "Pivot Lookback Bars",
+            min_value=2,
+            max_value=15,
+            value=config['detection']['pivot']['left_bars'],
+            step=1,
+            help="Bars left/right for pivot point detection"
+        )
+        
+        # Fibonacci toggle
+        enable_fibonacci = st.checkbox(
+            "Enable Fibonacci Levels",
+            value=config['detection'].get('fibonacci', {}).get('enabled', False),
+            help="Add Fibonacci retracement levels to detection"
+        )
+        
         st.markdown("---")
         
         # Trading specs display
@@ -226,6 +253,11 @@ def main():
     config['detection']['min_touches'] = min_touches
     config['detection']['price_tolerance'] = price_tolerance
     config['detection']['strength_threshold'] = strength_threshold
+    config['detection']['pivot']['left_bars'] = pivot_bars
+    config['detection']['pivot']['right_bars'] = pivot_bars
+    if 'fibonacci' not in config['detection']:
+        config['detection']['fibonacci'] = {}
+    config['detection']['fibonacci']['enabled'] = enable_fibonacci
     config['visualization']['show_volume'] = show_volume
     config['analysis']['max_levels_per_side'] = max_levels
     
@@ -329,8 +361,35 @@ def display_single_contract_analysis(contract_name: str, results: dict, config: 
             st.metric(
                 "Volatility",
                 f"{volatility:.2f}%",
-                help="Price volatility"
+                help="Annualized price volatility"
             )
+    
+    # Second row of metrics: RSI, Trend, ATR, Implied Rate
+    col5, col6, col7, col8 = st.columns(4)
+    
+    with col5:
+        if results['statistics']:
+            rsi = results['statistics'].get('rsi')
+            if rsi is not None:
+                rsi_label = "Overbought" if rsi > 70 else ("Oversold" if rsi < 30 else "Neutral")
+                st.metric("RSI (14)", f"{rsi:.1f}", delta=rsi_label,
+                          delta_color="inverse" if rsi > 70 else ("normal" if rsi < 30 else "off"))
+    
+    with col6:
+        if results['statistics']:
+            trend = results['statistics'].get('trend', 'neutral')
+            trend_icons = {'bullish': '🟢 Bullish', 'bearish': '🔴 Bearish', 'neutral': '🟡 Neutral'}
+            st.metric("Trend", trend_icons.get(trend, trend.capitalize()))
+    
+    with col7:
+        if results['statistics']:
+            atr = results['statistics'].get('atr')
+            if atr is not None:
+                st.metric("ATR (14)", f"{atr:.4f}", help="Average True Range")
+    
+    with col8:
+        implied_rate = 100 - results['current_price']
+        st.metric("Implied Rate", f"{implied_rate:.3f}%", help="100 - Price")
     
     st.markdown("---")
     
@@ -655,94 +714,140 @@ def display_multi_contract_comparison(results_dict: dict, config: dict):
 
 
 def create_plotly_chart(results: dict, config: dict):
-    """Create an interactive Plotly chart"""
+    """Create an interactive Plotly chart with candlesticks, BB, RSI, and S/R levels"""
     
     df = results['data']
     show_volume = config['visualization'].get('show_volume', True)
+    has_rsi = 'RSI' in df.columns
+    has_bb = 'BB_Upper' in df.columns
     
-    # Create subplots
+    # Determine layout
+    rows = 1
+    row_heights = [1.0]
+    subplot_titles = ['Price']
+    
     if show_volume:
-        fig = make_subplots(
-            rows=2, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.7, 0.3],
-            subplot_titles=('Price', 'Volume')
-        )
-    else:
-        fig = go.Figure()
+        rows += 1
+        subplot_titles.append('Volume')
+    if has_rsi:
+        rows += 1
+        subplot_titles.append('RSI')
+    
+    # Recalculate row heights
+    if rows == 1:
+        row_heights = [1.0]
+    elif rows == 2:
+        row_heights = [0.7, 0.3]
+    elif rows == 3:
+        row_heights = [0.55, 0.25, 0.20]
+    
+    fig = make_subplots(
+        rows=rows, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=row_heights,
+        subplot_titles=tuple(subplot_titles)
+    )
     
     # Candlestick chart
-    candlestick = go.Candlestick(
-        x=df.index,
-        open=df['Open'],
-        high=df['High'],
-        low=df['Low'],
-        close=df['Close'],
-        name='Price',
-        increasing_line_color='green',
-        decreasing_line_color='red'
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index, open=df['Open'], high=df['High'],
+            low=df['Low'], close=df['Close'],
+            name='Price',
+            increasing_line_color='#26a69a',
+            decreasing_line_color='#ef5350'
+        ), row=1, col=1
     )
     
-    if show_volume:
-        fig.add_trace(candlestick, row=1, col=1)
-    else:
-        fig.add_trace(candlestick)
+    # Bollinger Bands
+    if has_bb:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['BB_Upper'], mode='lines',
+            line=dict(color='rgba(173,216,230,0.5)', width=1),
+            name='BB Upper', showlegend=False
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['BB_Lower'], mode='lines',
+            line=dict(color='rgba(173,216,230,0.5)', width=1),
+            name='BB Lower', fill='tonexty',
+            fillcolor='rgba(173,216,230,0.1)', showlegend=False
+        ), row=1, col=1)
     
-    # Add support levels
+    # Moving averages
+    if 'SMA_20' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['SMA_20'], mode='lines',
+            line=dict(color='orange', width=1), name='SMA 20', opacity=0.7
+        ), row=1, col=1)
+    if 'SMA_50' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['SMA_50'], mode='lines',
+            line=dict(color='purple', width=1), name='SMA 50', opacity=0.7
+        ), row=1, col=1)
+    
+    # Support levels
     for level in results['support_levels']:
+        opacity = 0.9 if level.strength_score >= 0.8 else 0.6
+        width = 2.5 if level.strength_score >= 0.8 else 1.5
         fig.add_hline(
-            y=level.price,
-            line_dash="dash",
-            line_color="green",
-            opacity=0.6,
-            annotation_text=f"S: {level.price:.4f}",
-            annotation_position="right",
-            row=1 if show_volume else None
+            y=level.price, line_dash="dash", line_color="green",
+            line_width=width, opacity=opacity,
+            annotation_text=f"S: {level.price:.4f} ({level.strength_score:.0%})",
+            annotation_position="right", row=1
         )
     
-    # Add resistance levels
+    # Resistance levels
     for level in results['resistance_levels']:
+        opacity = 0.9 if level.strength_score >= 0.8 else 0.6
+        width = 2.5 if level.strength_score >= 0.8 else 1.5
         fig.add_hline(
-            y=level.price,
-            line_dash="dash",
-            line_color="red",
-            opacity=0.6,
-            annotation_text=f"R: {level.price:.4f}",
-            annotation_position="right",
-            row=1 if show_volume else None
+            y=level.price, line_dash="dash", line_color="red",
+            line_width=width, opacity=opacity,
+            annotation_text=f"R: {level.price:.4f} ({level.strength_score:.0%})",
+            annotation_position="right", row=1
         )
     
-    # Add volume bars
+    # Volume bars
+    vol_row = 2 if show_volume else None
     if show_volume:
-        colors = ['red' if df['Close'].iloc[i] < df['Open'].iloc[i] else 'green' 
+        colors = ['#ef5350' if df['Close'].iloc[i] < df['Open'].iloc[i] else '#26a69a' 
                   for i in range(len(df))]
-        
-        fig.add_trace(
-            go.Bar(
-                x=df.index,
-                y=df['Volume'],
-                name='Volume',
-                marker_color=colors,
-                showlegend=False
-            ),
-            row=2, col=1
-        )
+        fig.add_trace(go.Bar(
+            x=df.index, y=df['Volume'], name='Volume',
+            marker_color=colors, showlegend=False
+        ), row=vol_row, col=1)
+        if 'Volume_MA' in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['Volume_MA'], mode='lines',
+                line=dict(color='orange', width=1), name='Vol MA', showlegend=False
+            ), row=vol_row, col=1)
     
-    # Update layout
+    # RSI
+    rsi_row = rows if has_rsi else None
+    if has_rsi:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['RSI'], mode='lines',
+            line=dict(color='#ab47bc', width=1.5), name='RSI'
+        ), row=rsi_row, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.4, row=rsi_row, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.4, row=rsi_row, col=1)
+        fig.add_hline(y=50, line_dash="dot", line_color="gray", opacity=0.3, row=rsi_row, col=1)
+        fig.update_yaxes(title_text="RSI", range=[0, 100], row=rsi_row, col=1)
+    
+    # Layout
     fig.update_layout(
         title=f"{results['contract']} - Support & Resistance Analysis",
-        xaxis_title="Date",
-        yaxis_title="Price",
-        height=700,
+        height=800 if rows <= 2 else 900,
         showlegend=True,
         hovermode='x unified',
-        xaxis_rangeslider_visible=False
+        xaxis_rangeslider_visible=False,
+        template='plotly_dark'
     )
     
+    fig.update_yaxes(title_text="Price", row=1, col=1)
     if show_volume:
-        fig.update_yaxes(title_text="Price", row=1, col=1)
-        fig.update_yaxes(title_text="Volume", row=2, col=1)
+        fig.update_yaxes(title_text="Volume", row=vol_row, col=1)
     
     return fig
 

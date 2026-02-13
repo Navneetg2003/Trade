@@ -3,10 +3,14 @@ SOFR Analyzer
 Main analysis class that coordinates data fetching, level detection, and reporting
 """
 
+import logging
 import pandas as pd
+import numpy as np
 from typing import Dict, List, Tuple
 from .data_handler import SOFRDataHandler
 from .level_detector import LevelDetector, Level
+
+logger = logging.getLogger(__name__)
 
 
 class SOFRAnalyzer:
@@ -34,6 +38,8 @@ class SOFRAnalyzer:
         Returns:
             Dictionary with analysis results
         """
+        logger.info(f"Starting analysis for {contract}")
+        
         # Fetch data
         lookback_days = self.config['detection']['lookback_days']
         df = self.data_handler.get_contract_data(contract, lookback_days)
@@ -66,7 +72,7 @@ class SOFRAnalyzer:
         for level in nearest_resistances:
             level.strength_score = self.level_detector.calculate_level_strength_score(level, df)
         
-        # Sort by price
+        # Sort supports by price descending (nearest first), resistance ascending
         nearest_supports.sort(key=lambda x: x.price, reverse=True)
         nearest_resistances.sort(key=lambda x: x.price)
         
@@ -82,6 +88,9 @@ class SOFRAnalyzer:
             'all_resistance_levels': resistance_levels,
             'statistics': self._calculate_statistics(df, nearest_supports, nearest_resistances)
         }
+        
+        logger.info(f"Analysis complete for {contract}: "
+                    f"{len(nearest_supports)} supports, {len(nearest_resistances)} resistances")
         
         return results
     
@@ -141,9 +150,25 @@ class SOFRAnalyzer:
         trading_range = None
         if nearest_support and nearest_resistance:
             trading_range = nearest_resistance.price - nearest_support.price
-            position_in_range = (current_price - nearest_support.price) / trading_range
+            position_in_range = (current_price - nearest_support.price) / trading_range if trading_range > 0 else None
         else:
             position_in_range = None
+        
+        # Volatility (annualized from daily returns)
+        daily_returns = df['Close'].pct_change().dropna()
+        volatility = daily_returns.std() * np.sqrt(252) if len(daily_returns) > 1 else 0.0
+        
+        # Trend detection using SMA crossover and price momentum
+        trend = self._detect_trend(df)
+        
+        # Price range (high - low over the period)
+        price_range = df['High'].max() - df['Low'].min()
+        
+        # Average volume
+        avg_volume = df['Volume'].mean() if 'Volume' in df.columns else 0
+        
+        # RSI
+        rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else None
         
         stats = {
             'current_price': current_price,
@@ -157,10 +182,66 @@ class SOFRAnalyzer:
             'position_in_range': position_in_range,
             'total_support_levels': len(supports),
             'total_resistance_levels': len(resistances),
-            'atr': df['ATR'].iloc[-1] if 'ATR' in df.columns else None
+            'atr': df['ATR'].iloc[-1] if 'ATR' in df.columns else None,
+            'volatility': volatility,
+            'trend': trend,
+            'price_range': price_range,
+            'avg_volume': avg_volume,
+            'rsi': rsi,
         }
         
         return stats
+    
+    def _detect_trend(self, df: pd.DataFrame) -> str:
+        """
+        Detect the current price trend using multiple signals.
+        
+        Returns:
+            'bullish', 'bearish', or 'neutral'
+        """
+        signals = 0  # positive = bullish, negative = bearish
+        
+        # Signal 1: Price vs SMA_20
+        if 'SMA_20' in df.columns and pd.notna(df['SMA_20'].iloc[-1]):
+            if df['Close'].iloc[-1] > df['SMA_20'].iloc[-1]:
+                signals += 1
+            else:
+                signals -= 1
+        
+        # Signal 2: SMA_20 vs SMA_50 crossover
+        if 'SMA_20' in df.columns and 'SMA_50' in df.columns:
+            sma20 = df['SMA_20'].iloc[-1]
+            sma50 = df['SMA_50'].iloc[-1]
+            if pd.notna(sma20) and pd.notna(sma50):
+                if sma20 > sma50:
+                    signals += 1
+                else:
+                    signals -= 1
+        
+        # Signal 3: EMA trend
+        if 'EMA_9' in df.columns and 'EMA_21' in df.columns:
+            ema9 = df['EMA_9'].iloc[-1]
+            ema21 = df['EMA_21'].iloc[-1]
+            if pd.notna(ema9) and pd.notna(ema21):
+                if ema9 > ema21:
+                    signals += 1
+                else:
+                    signals -= 1
+        
+        # Signal 4: Recent price momentum (5-day)
+        if len(df) >= 5:
+            five_day_return = (df['Close'].iloc[-1] / df['Close'].iloc[-5]) - 1
+            if five_day_return > 0.001:
+                signals += 1
+            elif five_day_return < -0.001:
+                signals -= 1
+        
+        if signals >= 2:
+            return 'bullish'
+        elif signals <= -2:
+            return 'bearish'
+        else:
+            return 'neutral'
     
     def print_analysis_report(self, results: Dict):
         """

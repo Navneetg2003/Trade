@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import logging
 import yaml
 import os
 import sys
@@ -17,6 +18,19 @@ from datetime import datetime
 
 from src.analyzer import SOFRAnalyzer
 from src.visualizer import TradingVisualizer
+
+
+def setup_logging(verbose: bool = False):
+    """Configure logging for the application"""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s | %(name)-20s | %(levelname)-7s | %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    # Quiet down noisy libraries
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('yfinance').setLevel(logging.WARNING)
 
 
 def load_config(config_path: str = 'config.yaml') -> dict:
@@ -142,7 +156,17 @@ Examples:
         help='Skip chart generation (text output only)'
     )
     
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose/debug logging'
+    )
+    
     args = parser.parse_args()
+    
+    # Setup logging
+    setup_logging(args.verbose)
+    logger = logging.getLogger('main')
     
     # Load configuration
     config = load_config(args.config)

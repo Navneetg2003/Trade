@@ -74,9 +74,15 @@ class LevelDetector:
         # Method 3: High volume areas
         volume_levels = self._find_volume_levels(df)
         
+        # Method 4: Fibonacci retracements
+        current_price = df['Close'].iloc[-1]
+        fib_supports, fib_resistances = self.find_fibonacci_levels(df, current_price)
+        
         # Combine and consolidate levels
-        all_supports = pivot_supports + cluster_supports + volume_levels['support']
-        all_resistances = pivot_resistances + cluster_resistances + volume_levels['resistance']
+        all_supports = pivot_supports + cluster_supports + volume_levels['support'] + fib_supports
+        all_resistances = pivot_resistances + cluster_resistances + volume_levels['resistance'] + fib_resistances
+        
+        logger.info(f"Raw levels: {len(all_supports)} supports, {len(all_resistances)} resistances")
         
         # Consolidate nearby levels
         consolidated_supports = self._consolidate_levels(all_supports, 'support')
@@ -116,8 +122,9 @@ class LevelDetector:
             if idx < len(df):
                 price = df['Low'].iloc[idx]
                 date = df.index[idx]
+                volume = df['Volume'].iloc[idx] if 'Volume' in df.columns else 0.0
                 level = Level(price, 'support')
-                level.add_touch(date, price)
+                level.add_touch(date, price, volume)
                 supports.append(level)
         
         # Find local maxima (resistance)
@@ -131,10 +138,12 @@ class LevelDetector:
             if idx < len(df):
                 price = df['High'].iloc[idx]
                 date = df.index[idx]
+                volume = df['Volume'].iloc[idx] if 'Volume' in df.columns else 0.0
                 level = Level(price, 'resistance')
-                level.add_touch(date, price)
+                level.add_touch(date, price, volume)
                 resistances.append(level)
         
+        logger.debug(f"Found {len(supports)} pivot supports, {len(resistances)} pivot resistances")
         return supports, resistances
     
     def _find_clustered_levels(self, df: pd.DataFrame) -> Tuple[List[Level], List[Level]]:
@@ -158,30 +167,33 @@ class LevelDetector:
         low_bins = defaultdict(list)
         for idx, row in df.iterrows():
             bin_key = round(row['Low'] / bin_size) * bin_size
-            low_bins[bin_key].append((idx, row['Low']))
+            vol = row['Volume'] if 'Volume' in df.columns else 0.0
+            low_bins[bin_key].append((idx, row['Low'], vol))
         
         # Count touches in resistance zone (near highs)
         high_bins = defaultdict(list)
         for idx, row in df.iterrows():
             bin_key = round(row['High'] / bin_size) * bin_size
-            high_bins[bin_key].append((idx, row['High']))
+            vol = row['Volume'] if 'Volume' in df.columns else 0.0
+            high_bins[bin_key].append((idx, row['High'], vol))
         
         # Create support levels from clustered lows
         for price, touches in low_bins.items():
             if len(touches) >= 2:
                 level = Level(price, 'support')
-                for date, touch_price in touches:
-                    level.add_touch(date, touch_price)
+                for date, touch_price, vol in touches:
+                    level.add_touch(date, touch_price, vol)
                 supports.append(level)
         
         # Create resistance levels from clustered highs
         for price, touches in high_bins.items():
             if len(touches) >= 2:
                 level = Level(price, 'resistance')
-                for date, touch_price in touches:
-                    level.add_touch(date, touch_price)
+                for date, touch_price, vol in touches:
+                    level.add_touch(date, touch_price, vol)
                 resistances.append(level)
         
+        logger.debug(f"Found {len(supports)} cluster supports, {len(resistances)} cluster resistances")
         return supports, resistances
     
     def _find_volume_levels(self, df: pd.DataFrame) -> Dict[str, List[Level]]:
@@ -334,6 +346,7 @@ class LevelDetector:
     def calculate_level_strength_score(self, level: Level, df: pd.DataFrame) -> float:
         """
         Calculate a strength score for a level (0-1)
+        Uses 5 factors: touches, recency, bounce quality, volume confirmation, level age span.
         
         Args:
             level: Level object
@@ -344,18 +357,122 @@ class LevelDetector:
         """
         score = 0.0
         
-        # Factor 1: Number of touches (normalized)
-        touch_score = min(level.strength / 5.0, 1.0) * 0.4
+        # Factor 1: Number of touches (30%)
+        touch_score = min(level.strength / 6.0, 1.0) * 0.30
         score += touch_score
         
-        # Factor 2: Recency of tests
+        # Factor 2: Recency of last test (20%)
         if level.last_test:
             days_ago = (df.index[-1] - level.last_test).days
-            recency_score = max(0, 1 - days_ago / 90) * 0.3
+            recency_score = max(0, 1 - days_ago / 90) * 0.20
             score += recency_score
         
-        # Factor 3: Clear bounces (price respected the level)
-        bounce_score = 0.3  # Simplified for now
+        # Factor 3: Actual bounce quality — did price reverse after touching? (25%)
+        bounce_score = self._calculate_bounce_quality(level, df) * 0.25
         score += bounce_score
         
+        # Factor 4: Volume confirmation — higher volume at level = stronger (15%)
+        if level.avg_volume_at_level > 0 and 'Volume' in df.columns:
+            avg_vol = df['Volume'].mean()
+            vol_ratio = min(level.avg_volume_at_level / avg_vol, 2.0) / 2.0
+            score += vol_ratio * 0.15
+        else:
+            score += 0.05  # small baseline
+        
+        # Factor 5: Level age span — levels tested over longer periods are stronger (10%)
+        if level.age_days is not None:
+            age_score = min(level.age_days / 60.0, 1.0) * 0.10
+            score += age_score
+        
         return min(score, 1.0)
+    
+    def _calculate_bounce_quality(self, level: Level, df: pd.DataFrame) -> float:
+        """
+        Measure how well price respects a level by checking for reversals after touches.
+        
+        Returns:
+            Score 0-1 indicating bounce quality
+        """
+        if not level.touches or len(df) < 5:
+            return 0.3  # baseline
+        
+        bounces = 0
+        total_checks = 0
+        look_ahead = 3  # check next N bars after touch
+        
+        for touch in level.touches:
+            touch_date = touch['date']
+            if touch_date not in df.index:
+                continue
+            
+            idx = df.index.get_loc(touch_date)
+            if idx + look_ahead >= len(df):
+                continue
+            
+            total_checks += 1
+            
+            if level.type == 'support':
+                # For support, price should move UP after touching
+                future_close = df['Close'].iloc[idx + 1: idx + look_ahead + 1].max()
+                if future_close > touch['price']:
+                    bounces += 1
+            else:
+                # For resistance, price should move DOWN after touching
+                future_close = df['Close'].iloc[idx + 1: idx + look_ahead + 1].min()
+                if future_close < touch['price']:
+                    bounces += 1
+        
+        if total_checks == 0:
+            return 0.3
+        
+        return bounces / total_checks
+    
+    def find_fibonacci_levels(self, df: pd.DataFrame, 
+                              current_price: float) -> Tuple[List[Level], List[Level]]:
+        """
+        Calculate Fibonacci retracement levels from the swing high/low.
+        
+        Args:
+            df: DataFrame with OHLC data
+            current_price: Current price for classifying as support/resistance
+            
+        Returns:
+            Tuple of (support_levels, resistance_levels)
+        """
+        fib_config = self.detection_config.get('fibonacci', {})
+        if not fib_config.get('enabled', False):
+            return [], []
+        
+        fib_ratios = fib_config.get('levels', [0.236, 0.382, 0.5, 0.618, 0.786])
+        
+        swing_high = df['High'].max()
+        swing_low = df['Low'].min()
+        price_range = swing_high - swing_low
+        
+        if price_range <= 0:
+            return [], []
+        
+        supports = []
+        resistances = []
+        
+        for ratio in fib_ratios:
+            # Retracement from high (in an uptrend, these are support)
+            fib_price = swing_high - (price_range * ratio)
+            fib_price = round(fib_price, 4)
+            
+            level = Level(fib_price, 'support' if fib_price < current_price else 'resistance')
+            level.strength_score = 0.5  # moderate default for fib levels
+            # Count how many times price has tested this fib level
+            for idx, row in df.iterrows():
+                if abs(row['Low'] - fib_price) <= self.price_tolerance:
+                    level.add_touch(idx, row['Low'], row.get('Volume', 0))
+                elif abs(row['High'] - fib_price) <= self.price_tolerance:
+                    level.add_touch(idx, row['High'], row.get('Volume', 0))
+            
+            if fib_price < current_price:
+                supports.append(level)
+            else:
+                resistances.append(level)
+        
+        logger.debug(f"Fibonacci: {len(supports)} supports, {len(resistances)} resistances")
+        return supports, resistances

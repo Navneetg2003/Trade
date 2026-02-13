@@ -3,12 +3,15 @@ Data Handler for SOFR Futures
 Handles data fetching, processing, and formatting for SOFR futures contracts
 """
 
+import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
 import os
+
+logger = logging.getLogger(__name__)
 
 
 class SOFRDataHandler:
@@ -37,6 +40,7 @@ class SOFRDataHandler:
         Returns:
             DataFrame with OHLCV data
         """
+        logger.info(f"Loading data for {contract} (provider={self.provider})")
         if self.provider == 'yahoo':
             return self._fetch_yahoo_data(contract, lookback_days)
         elif self.provider == 'csv':
@@ -58,7 +62,7 @@ class SOFRDataHandler:
         ticker = self.ticker_mapping.get(contract)
         
         if not ticker:
-            print(f"Warning: No ticker mapping for {contract}, using sample data")
+            logger.warning(f"No ticker mapping for {contract}, using sample data")
             return self._generate_sample_data(contract, lookback_days)
         
         try:
@@ -69,18 +73,18 @@ class SOFRDataHandler:
             data = yf.download(ticker, start=start_date, end=end_date, progress=False)
             
             if data.empty:
-                print(f"No data returned for {contract}, generating sample data")
+                logger.warning(f"No data returned for {contract}, generating sample data")
                 return self._generate_sample_data(contract, lookback_days)
             
             # Standardize column names
             data.columns = ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
             data['Contract'] = contract
-            
+            logger.info(f"Fetched {len(data)} rows for {contract} from Yahoo")
             return data
             
         except Exception as e:
-            print(f"Error fetching data for {contract}: {e}")
-            print("Generating sample data instead")
+            logger.error(f"Error fetching data for {contract}: {e}")
+            logger.info("Generating sample data instead")
             return self._generate_sample_data(contract, lookback_days)
     
     def _load_csv_data(self, contract: str) -> pd.DataFrame:
@@ -97,15 +101,16 @@ class SOFRDataHandler:
         file_path = os.path.join(csv_path, f"{contract}.csv")
         
         if not os.path.exists(file_path):
-            print(f"CSV file not found for {contract}, generating sample data")
+            logger.warning(f"CSV file not found for {contract} at {file_path}, generating sample data")
             return self._generate_sample_data(contract, 90)
         
         try:
             data = pd.read_csv(file_path, index_col=0, parse_dates=True)
             data['Contract'] = contract
+            logger.info(f"Loaded {len(data)} rows for {contract} from CSV")
             return data
         except Exception as e:
-            print(f"Error loading CSV for {contract}: {e}")
+            logger.error(f"Error loading CSV for {contract}: {e}")
             return self._generate_sample_data(contract, 90)
     
     def _generate_sample_data(self, contract: str, days: int = 90) -> pd.DataFrame:
@@ -238,6 +243,10 @@ class SOFRDataHandler:
         df['SMA_20'] = df['Close'].rolling(window=20).mean()
         df['SMA_50'] = df['Close'].rolling(window=50).mean()
         
+        # Exponential moving averages
+        df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
+        df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
+        
         # Volume moving average
         df['Volume_MA'] = df['Volume'].rolling(window=20).mean()
         
@@ -248,5 +257,29 @@ class SOFRDataHandler:
         
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df['ATR'] = true_range.rolling(window=14).mean()
+        
+        # RSI (Relative Strength Index)
+        delta = df['Close'].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=14, min_periods=1).mean()
+        avg_loss = loss.rolling(window=14, min_periods=1).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        df['RSI'] = 100 - (100 / (1 + rs))
+        df['RSI'] = df['RSI'].fillna(50)
+        
+        # Bollinger Bands
+        bb_sma = df['Close'].rolling(window=20).mean()
+        bb_std = df['Close'].rolling(window=20).std()
+        df['BB_Upper'] = bb_sma + 2 * bb_std
+        df['BB_Lower'] = bb_sma - 2 * bb_std
+        df['BB_Mid'] = bb_sma
+        df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Mid']
+        
+        # VWAP (Volume-Weighted Average Price) — rolling daily
+        df['VWAP'] = (df['Close'] * df['Volume']).cumsum() / df['Volume'].cumsum()
+        
+        # Price Rate of Change
+        df['ROC'] = df['Close'].pct_change(periods=10) * 100
         
         return df
